@@ -207,34 +207,34 @@ class SentimentClassifier: #[7]
         return self.model
 
     def predict_sentiment(self, df):
-     """
-     Predict sentiment for given DataFrame
-     """
-     if self.model is None:
-         raise ValueError("Model not trained. Call train_model() first.")
- 
-     # Make predictions
-     predictions = self.model.transform(df)
- 
-     # FIX: Explicitly cast the VectorUDT to Array<Double> type for extraction
-     predictions = predictions.withColumn(
-         "probability_array",
-         col("probability").cast("array<double>") # CHANGED from "array" to "array<double>"
-     )
- 
-     # Add readable sentiment labels and confidence score using the new array column
-     predictions = predictions.withColumn(
-         "predicted_sentiment",
-         when(col("prediction") == 1, "positive").otherwise("negative") # [6]
-     ).withColumn(
-         "confidence",
-         # Access elements from the newly cast Array column
-         greatest(col("probability_array").getItem(0), col("probability_array").getItem(1))
-     )
-     
-     # Select final columns, excluding the temporary 'probability_array' column
-     return predictions.drop("probability_array")
-
+        """
+        Predict sentiment for given DataFrame
+        """
+        if self.model is None:
+            raise ValueError("Model not trained. Call train_model() first.")
+    
+        # Make predictions
+        predictions = self.model.transform(df)
+    
+        # FIX: Explicitly cast the VectorUDT to Array<Double> type for safe extraction.
+        # We must use 'array<double>' instead of generic 'array' to satisfy Spark's type checking.
+        predictions = predictions.withColumn(
+            "probability_array",
+            col("probability").cast("array<double>") # <-- CRITICAL FIX HERE
+        )
+    
+        # Add readable sentiment labels and confidence score using the new array column
+        predictions = predictions.withColumn(
+            "predicted_sentiment",
+            when(col("prediction") == 1, "positive").otherwise("negative") # [6]
+        ).withColumn(
+            "confidence",
+            # Access elements from the newly cast Array column
+            greatest(col("probability_array").getItem(0), col("probability_array").getItem(1)) # Derived from [6]
+        )
+        
+        # Drop the temporary column and return
+        return predictions.drop("probability_array")
 # =============================================================================
 # 3. SPARK STRUCTURED STREAMING PROCESSOR
 # =============================================================================
