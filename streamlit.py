@@ -24,13 +24,16 @@ from newsapi import NewsApiClient
 # [Note: This setup function remains necessary]
 def setup_pyspark_env():
     python_path = sys.executable
-    os.environ['PYSPARK_PYTHON'] = python_path
-    os.environ['PYSPARK_DRIVER_PYTHON'] = python_path
-    os.environ['PYTHONHASHSEED'] = '0'
-    os.environ['SPARK_LOCAL_HOSTNAME'] = 'localhost'
-    os.environ['SPARK_SQL_EXECUTION_ARROW_PYSPARK_ENABLED'] = 'false'
-    # print(f"✅ PySpark environment configured for: {python_path}") # Suppressed in Streamlit
-setup_pyspark_env() # [6]
+    os.environ['PYSPARK_PYTHON'] = python_path [12]
+    os.environ['PYSPARK_DRIVER_PYTHON'] = python_path [12]
+    os.environ['PYTHONHASHSEED'] = '0' [12]
+    os.environ['SPARK_LOCAL_HOSTNAME'] = 'localhost' [12]
+    os.environ['SPARK_SQL_EXECUTION_ARROW_PYSPARK_ENABLED'] = 'false' [12]
+    # NOTE: If running on a host where you manually set JAVA_HOME, you would also set it here.
+    # os.environ['JAVA_HOME'] = "/path/to/java/installation" 
+    print(f"✅ PySpark environment configured for: {python_path}")
+    
+setup_pyspark_env()
 
 # --- Configuration (from Section 1) ---
 OUTPUT_DIR = "data/input" # [7]
