@@ -1,112 +1,121 @@
-#unified_sentiment_app.py
-
-# =============================================================================
-# 0. IMPORTS (Gathered from sections 1, 2, 3, 4, 5)
-# =============================================================================
 import os
 import sys
 import json
 import time
+import threading
 from datetime import datetime
 import pandas as pd
 import streamlit as st
 import plotly.express as px
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+# Imports for PySpark components
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import *
 from pyspark.sql.types import *
 from pyspark.ml import Pipeline, PipelineModel
-from pyspark.ml.feature import Tokenizer, StopWordsRemover, CountVectorizer, IDF, StringIndexer
+from pyspark.ml.feature import Tokenizer, StopWordsRemover, CountVectorizer, IDF
 from pyspark.ml.classification import LogisticRegression
-# NewsAPI Client (Requires installation: pip install newsapi-python)
-from newsapi import NewsApiClient
+from newsapi import NewsApiClient # [1]
 
-# Set up PySpark environment (Required for running Spark within Streamlit/Python context)
-# [Note: This setup function remains necessary]
+# =============================================================================
+# --- Configuration & Environment Setup ---
+# =============================================================================
+
+OUTPUT_DIR = "data/input" # [1]
+MODEL_PATH = "models/sentiment_model"
+DASHBOARD_FILE = "data/output/latest_results.json"
+
+QUERY = "technology OR business OR finance" # [2]
+FETCH_INTERVAL_SECONDS = 60 # [2]
+API_KEY = os.getenv('NEWS_API_KEY') # [2]
+
+# Set up PySpark environment variables [3, 4]
 def setup_pyspark_env():
     python_path = sys.executable
-    os.environ['PYSPARK_PYTHON'] = python_path 
-    os.environ['PYSPARK_DRIVER_PYTHON'] = python_path 
-    os.environ['PYTHONHASHSEED'] = '0' 
-    os.environ['SPARK_LOCAL_HOSTNAME'] = 'localhost' 
-    os.environ['SPARK_SQL_EXECUTION_ARROW_PYSPARK_ENABLED'] = 'false' 
-    # NOTE: If running on a host where you manually set JAVA_HOME, you would also set it here.
-    # os.environ['JAVA_HOME'] = "/path/to/java/installation" 
+    os.environ['PYSPARK_PYTHON'] = python_path # [4]
+    os.environ['PYSPARK_DRIVER_PYTHON'] = python_path # [4]
+    # We comment out PYTHONHASHSEED assignment to avoid potential IndexErrors 
+    # observed in the deployment environment.
+    # os.environ['PYTHONHASHSEED'] = '0' 
+    os.environ['SPARK_LOCAL_HOSTNAME'] = 'localhost' # [4]
+    os.environ['SPARK_SQL_EXECUTION_ARROW_PYSPARK_ENABLED'] = 'false' # [4]
     print(f"✅ PySpark environment configured for: {python_path}")
     
-setup_pyspark_env()
+setup_pyspark_env() # [4]
 
-# --- Configuration (from Section 1) ---
-OUTPUT_DIR = "data/input" # [7]
-QUERY = "technology OR business OR finance" # [8]
-FETCH_INTERVAL_SECONDS = 60 # [8]
-API_KEY = os.getenv('NEWS_API_KEY') # [8]
-MODEL_PATH = "models/sentiment_model" # [5, 9]
-DASHBOARD_FILE = "data/output/latest_results.json" # Derived from [4, 10]
 
 # =============================================================================
-# 1. NEWS PRODUCER (Adapted for Asynchronous Execution)
+# 1. NEWS PRODUCER (Adapted for Threading)
 # =============================================================================
 
-def run_news_producer():
+def fetch_and_write_news(): # [2]
     """
-    Fetches news indefinitely. MUST be run in a separate, non-blocking thread/process.
+    Fetches news using NewsAPI and writes each headline
+    to a separate JSON file in the output directory. (Continuous loop)
     """
     if not API_KEY:
         print("Error: NEWS_API_KEY environment variable not set.")
         return
-
+        
+    print("Starting news producer with NewsAPI...")
     try:
-        newsapi = NewsApiClient(api_key=API_KEY) # [8]
+        newsapi = NewsApiClient(api_key=API_KEY) # [2]
     except Exception:
-        print("Error: Invalid API Key.")
+        print("Error: Invalid API Key. Please check your API_KEY environment variable.")
         return
 
     if not os.path.exists(OUTPUT_DIR):
-        os.makedirs(OUTPUT_DIR) # [3]
+        os.makedirs(OUTPUT_DIR) # [5]
+        print(f"Created directory: {OUTPUT_DIR}") # [5]
 
-    # --- THE FOLLOWING LOOP BLOCKS STREAMLIT ---
-    # In a deployment scenario, this needs to be moved to a background worker.
-    # We convert the continuous loop into a function call structure for integration.
-    while True:
+    while True: # [5]
         try:
-            response = newsapi.get_everything(
+            # print(f"Fetching news for query: '{QUERY}'...") # Suppressed for Streamlit log clarity
+            response = newsapi.get_everything( # [5]
                 q=QUERY,
                 language='en',
                 sort_by='relevancy',
-                page_size=20 # Limit to avoid rate limits [3]
+                page_size=20 
             )
 
-            if response['status'] == 'ok':
+            if response['status'] == 'ok': # [6]
                 articles = response.get('articles', [])
-                for item in articles:
-                    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
-                    file_path = os.path.join(OUTPUT_DIR, f"news_{timestamp}.json") # [11]
-                    news_data = {
-                        "headline": item['title'],
-                        "description": item.get('description', ''),
-                        "source": item.get('source', {}).get('name', 'Unknown'),
-                        "published_at": item.get('publishedAt', ''),
-                        "url": item.get('url', ''),
-                        "timestamp": datetime.now().isoformat()
-                    }
-                    with open(file_path, 'w') as f:
-                        json.dump(news_data, f)
+                if articles:
+                    # print(f"Fetched {len(articles)} news articles.") # Suppressed
+                    for item in articles:
+                        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+                        file_path = os.path.join(OUTPUT_DIR, f"news_{timestamp}.json") # [6]
+                        
+                        news_data = {
+                            "headline": item['title'],
+                            "description": item.get('description', ''),
+                            "source": item.get('source', {}).get('name', 'Unknown'), # [6]
+                            "published_at": item.get('publishedAt', ''),
+                            "url": item.get('url', ''),
+                            "timestamp": datetime.now().isoformat()
+                        }
+                        with open(file_path, 'w') as f:
+                            json.dump(news_data, f)
+                    # print(f"Successfully wrote {len(articles)} headlines to {OUTPUT_DIR}") # Suppressed
+                # else: print("No news articles found in this fetch.")
+
             else:
-                print(f"Error from NewsAPI: {response.get('message', 'Unknown error')}") # [11]
+                print(f"Error from NewsAPI: {response.get('message', 'Unknown error')}") # [6]
 
         except Exception as e:
-            print(f"An unexpected error occurred in Producer: {e}") # [12]
+            print(f"An unexpected error occurred: {e}") # [3]
 
-        time.sleep(FETCH_INTERVAL_SECONDS) # [12]
+        # print(f"Sleeping for {FETCH_INTERVAL_SECONDS} seconds...") # Suppressed
+        time.sleep(FETCH_INTERVAL_SECONDS) # [3]
+
 
 # =============================================================================
-# 2. SENTIMENT CLASSIFICATION ML PIPELINE (Integrated as Class)
+# 2. SENTIMENT CLASSIFICATION ML PIPELINE
 # =============================================================================
 
-# [This class (SentimentClassifier) remains largely unchanged, defined by sources 7-14]
-class SentimentClassifier:
+class SentimentClassifier: #[7]
     def __init__(self):
-        # Initialize Spark Session [1]
         try:
             self.spark = SparkSession.builder \
                 .appName("NewsSentimentClassification") \
@@ -115,23 +124,22 @@ class SentimentClassifier:
                 .config("spark.serializer", "org.apache.spark.serializer.KryoSerializer") \
                 .config("spark.sql.execution.arrow.pyspark.enabled", "false") \
                 .config("spark.python.worker.reuse", "false") \
-                .master("local[2]") \
+                .master("local[1]") \
                 .getOrCreate()
-            # Set log level to reduce noise [3]
-            self.spark.sparkContext.setLogLevel("ERROR")
+            # Set log level to reduce noise
+            self.spark.sparkContext.setLogLevel("ERROR") # [8]
             print("✅ Spark session created successfully")
         except Exception as e:
             print(f"❌ Error creating Spark session: {e}")
+            # Streamlit error display is handled in the calling function
             raise
         self.model = None
         self.pipeline = None
 
-    def create_training_data(self):
+    def create_training_data(self): # [9]
         """
-        Create synthetic training data for sentiment classification. [4]
-        In production, you would use a labeled dataset.
+        Create synthetic training data for sentiment classification.
         """
-        # Sample positive and negative headlines for training [4]
         positive_headlines = [
             "Company reports record profits this quarter",
             "New breakthrough in renewable energy technology",
@@ -142,11 +150,11 @@ class SentimentClassifier:
             "Technology advances improve healthcare outcomes",
             "Strong earnings drive share price up",
             "Investment in green energy creates jobs",
-            "Consumer confidence reaches decade high"
+            "Consumer confidence reaches decade high" # [9]
         ]
         negative_headlines = [
-            "Major data breach affects millions of users",
-            "Company announces massive layoffs", # [5]
+            "Major data breach affects millions of users", # [10]
+            "Company announces massive layoffs",
             "Stock prices plummet amid recession fears",
             "Economic downturn impacts global markets",
             "Cybersecurity threat shuts down operations",
@@ -154,50 +162,43 @@ class SentimentClassifier:
             "Supply chain disruptions cause delays",
             "Environmental disaster affects local business",
             "Trade war escalates between major economies",
-            "Corporate scandal leads to investigations"
+            "Corporate scandal leads to investigations" # [10]
         ]
 
-        # Create training DataFrame [6]
         training_data = []
         for headline in positive_headlines:
             training_data.append((headline, "positive", 1))
-
+        
         for headline in negative_headlines:
-            training_data.append((headline, "negative", 0))
+            training_data.append((headline, "negative", 0)) # [11]
 
         schema = StructType([
             StructField("headline", StringType(), True),
             StructField("sentiment_label", StringType(), True),
             StructField("label", IntegerType(), True)
         ])
-        return self.spark.createDataFrame(training_data, schema)
+        return self.spark.createDataFrame(training_data, schema) # [11]
 
-    def build_pipeline(self):
+    def build_pipeline(self): # [11]
         """
-        Build ML pipeline for sentiment classification [7]
+        Build ML pipeline for sentiment classification
         """
-        # Tokenization
         tokenizer = Tokenizer(inputCol="headline", outputCol="words")
-        # Remove stop words
-        remover = StopWordsRemover(inputCol="words", outputCol="filtered_words")
-        # Count Vectorizer [7]
+        remover = StopWordsRemover(inputCol="words", outputCol="filtered_words") # [12]
         cv = CountVectorizer(inputCol="filtered_words", outputCol="raw_features",
-                             vocabSize=1000, minDF=2.0)
-        # TF-IDF
-        idf = IDF(inputCol="raw_features", outputCol="features")
-        # Logistic Regression
-        lr = LogisticRegression(featuresCol="features", labelCol="label", maxIter=20)
-        # Create pipeline
-        self.pipeline = Pipeline(stages=[tokenizer, remover, cv, idf, lr])
+                             vocabSize=1000, minDF=2.0) # [12]
+        idf = IDF(inputCol="raw_features", outputCol="features") # [12]
+        lr = LogisticRegression(featuresCol="features", labelCol="label", maxIter=20) # [12]
+        self.pipeline = Pipeline(stages=[tokenizer, remover, cv, idf, lr]) # [12]
         return self.pipeline
 
-    def train_model(self):
+    def train_model(self): # [13]
         """
-        Train the sentiment classification model [8]
+        Train the sentiment classification model
         """
         print("Creating training data...")
-        training_df = self.create_training_data() # [8]
-        training_df.show(5)
+        training_df = self.create_training_data() # [13]
+        # training_df.show(5) # Removed show() for cleaner Streamlit execution
         print("Building ML pipeline...")
         pipeline = self.build_pipeline()
         print("Training model...")
@@ -205,188 +206,285 @@ class SentimentClassifier:
         print("Model training completed!")
         return self.model
 
-    def predict_sentiment(self, df):
+    def predict_sentiment(self, df): # [14]
         """
-        Predict sentiment for given DataFrame [9]
+        Predict sentiment for given DataFrame
         """
         if self.model is None:
             raise ValueError("Model not trained. Call train_model() first.")
 
-        # Make predictions
         predictions = self.model.transform(df)
 
-        # Add readable sentiment labels [9]
         predictions = predictions.withColumn(
             "predicted_sentiment",
-            when(col("prediction") == 1, "positive").otherwise("negative")
+            when(col("prediction") == 1, "positive").otherwise("negative") # [14]
         ).withColumn(
             "confidence",
             greatest(col("probability").getItem(0), col("probability").getItem(1))
         )
-        return predictions
+        return predictions # [14]
 
-    # [create_training_data, build_pipeline, train_model, predict_sentiment methods
-    # (Sources 9-14) would be included here.]
 
 # =============================================================================
-# 3. SPARK STRUCTURED STREAMING PROCESSOR (Adapted for Background Use)
+# 3. SPARK STRUCTURED STREAMING PROCESSOR
 # =============================================================================
 
-# [This class (NewsStreamProcessor) remains largely unchanged, defined by sources 15-18]
-class NewsStreamProcessor:
+class NewsStreamProcessor: # [15]
     def __init__(self, classifier):
         self.spark = classifier.spark # [15]
         self.classifier = classifier
         self.output_dir = "data/output"
 
-        if not os.path.exists(self.output_dir):
+        if not os.path.exists(self.output_dir): # [15]
             os.makedirs(self.output_dir)
 
-    def process_streaming_news(self):
+    def process_streaming_news(self): # [16]
         """
-        Starts the Spark streaming query. MUST be run in a separate process
-        as it starts a continuous job.
+        Process streaming news data and classify sentiment in real-time
         """
-        schema = StructType([ # [15, 16]
+        print("Starting streaming news processing...")
+
+        schema = StructType([
             StructField("headline", StringType(), True),
+            StructField("description", StringType(), True), # [16]
             StructField("source", StringType(), True),
-            StructField("timestamp", StringType(), True) # Simplified schema for brevity
+            StructField("published_at", StringType(), True),
+            StructField("url", StringType(), True),
+            StructField("timestamp", StringType(), True)
         ])
 
         streaming_df = self.spark \
             .readStream \
             .option("multiline", "true") \
             .schema(schema) \
-            .json(OUTPUT_DIR) # Reads from the Producer's output directory [16]
+            .json(OUTPUT_DIR) # [16]
+
+        streaming_df = streaming_df.withColumn("processing_time", current_timestamp()) # [16]
 
         def process_batch(batch_df, batch_id):
+            print(f"Processing batch {batch_id} with {batch_df.count()} records...") # [17]
             if batch_df.count() > 0: # [17]
-                predictions = self.classifier.predict_sentiment(batch_df) # [17]
+                predictions = self.classifier.predict_sentiment(batch_df)
+                
                 results = predictions.select(
-                    "headline", "source", "predicted_sentiment", "confidence", "timestamp"
+                    "headline", "source", "predicted_sentiment",
+                    "confidence", "timestamp", "processing_time" # [17]
                 )
                 
-                # Write to consolidated file for dashboard [4]
-                results_pandas = results.toPandas()
-                results_pandas.to_json(DASHBOARD_FILE, orient='records', date_format='iso')
+                # Write to consolidated file for dashboard
+                dashboard_file = DASHBOARD_FILE
+                results_pandas = results.toPandas() # [18]
+                results_pandas.to_json(dashboard_file, orient='records', date_format='iso') # [18]
+                
+                # Removed detailed logging show() and write.json(output_path) for cleaner background thread operation
 
         query = streaming_df \
             .writeStream \
             .foreachBatch(process_batch) \
             .option("checkpointLocation", "data/checkpoint") \
-            .start() # [4]
-
-        # Note: We omit query.awaitTermination() [5] because we need this function to return
-        # quickly, allowing Streamlit to continue refreshing the UI.
+            .start() # [18]
 
         return query # The query object must be managed by the background process manager.
 
+
 # =============================================================================
-# 4. STREAMLIT APPLICATION RUNNER
+# 4. STREAMLIT DASHBOARD & RUNNER
 # =============================================================================
 
-# Helper functions for setup
+class NewsDashboard: # [19]
+    def __init__(self):
+        self.results_file = DASHBOARD_FILE
+
+    def load_results(self): # [19]
+        """
+        Load latest sentiment analysis results
+        """
+        try:
+            if os.path.exists(self.results_file):
+                return pd.read_json(self.results_file)
+            else:
+                return pd.DataFrame()
+        except Exception as e:
+            st.error(f"Error loading results: {e}")
+            return pd.DataFrame()
+
+    def create_dashboard(self, df, stream_running): # [20]
+        """
+        Create Streamlit dashboard interface
+        """
+        st.set_page_config(
+            page_title="Real-Time News Sentiment Dashboard",
+            page_icon="📰",
+            layout="wide"
+        ) # [20]
+        
+        st.title("📰 Real-Time News Sentiment Analysis Dashboard") # [20]
+        st.markdown("Live sentiment classification of news headlines using PySpark ML")
+
+        if not stream_running:
+            st.warning("System processes are inactive. Please start the real-time processes.")
+        
+        if df.empty:
+            st.warning("No data available yet. Waiting for streaming results...") # [21]
+            return
+
+        # Metrics [21]
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("Total Headlines", len(df))
+        with col2:
+            positive_count = len(df[df['predicted_sentiment'] == 'positive'])
+            st.metric("Positive", positive_count)
+        with col3:
+            negative_count = len(df[df['predicted_sentiment'] == 'negative'])
+            st.metric("Negative", negative_count)
+        with col4:
+            avg_confidence = df['confidence'].mean() if 'confidence' in df.columns else 0
+            st.metric("Avg Confidence", f"{avg_confidence:.2f}")
+
+        # Visualizations [22]
+        col1, col2 = st.columns(2)
+        with col1:
+            sentiment_counts = df['predicted_sentiment'].value_counts()
+            fig_pie = px.pie(
+                values=sentiment_counts.values,
+                names=sentiment_counts.index,
+                title="Sentiment Distribution",
+                color_discrete_map={'positive': 'green', 'negative': 'red'}
+            )
+            st.plotly_chart(fig_pie, use_container_width=True) # [22]
+        
+        with col2:
+            if 'source' in df.columns:
+                source_sentiment = df.groupby(['source', 'predicted_sentiment']).size().unstack(fill_value=0) # [23]
+                fig_bar = px.bar(
+                    source_sentiment.reset_index(),
+                    x='source',
+                    y=['positive', 'negative'],
+                    title="Sentiment by News Source",
+                    color_discrete_map={'positive': 'green', 'negative': 'red'}
+                )
+                st.plotly_chart(fig_bar, use_container_width=True) # [23]
+
+        # Recent headlines table [24]
+        st.subheader("Recent Headlines")
+        display_df = df[['headline', 'source', 'predicted_sentiment', 'confidence']].copy()
+        display_df = display_df.sort_values('confidence', ascending=False).head(10)
+        
+        def style_sentiment(val): # [24]
+            color = 'green' if val == 'positive' else 'red'
+            return f'color: {color}; font-weight: bold'
+
+        styled_df = display_df.style.applymap(
+            style_sentiment, subset=['predicted_sentiment']
+        ).format({'confidence': '{:.3f}'}) # [24]
+        
+        st.dataframe(styled_df, use_container_width=True)
+        st.info("💡 This dashboard updates in real-time. Click refresh to see latest results.") # [24]
+
+
 def initialize_system():
-    """Initializes and trains the ML model."""
+    """Initializes environment, classifier, and trains/loads the ML model."""
+    
+    # Setup directories [25]
+    os.makedirs("data/output", exist_ok=True)
+    os.makedirs("data/input", exist_ok=True)
+    os.makedirs("models", exist_ok=True)
+    
     if 'classifier' not in st.session_state:
-        # 1. Setup Data Directories
-        os.makedirs("data/output", exist_ok=True)
-        os.makedirs("data/input", exist_ok=True)
-        os.makedirs("models", exist_ok=True)
-        
-        # 2. Initialize Classifier (and Spark session)
-        classifier = SentimentClassifier()
-        st.session_state['classifier'] = classifier
-        
-        # 3. Load or Train Model [5, 9]
-        if os.path.exists(MODEL_PATH):
-            classifier.model = PipelineModel.load(MODEL_PATH)
-            st.success("Loaded pre-trained ML model.")
-        else:
-            classifier.train_model()
-            classifier.model.write().overwrite().save(MODEL_PATH)
-            st.success("Trained and saved new ML model.")
+        # 1. Initialize Classifier (and Spark session) [7]
+        try:
+            classifier = SentimentClassifier()
+            st.session_state['classifier'] = classifier
+            
+            # 2. Load or Train Model [26, 27]
+            if os.path.exists(MODEL_PATH):
+                classifier.model = PipelineModel.load(MODEL_PATH)
+                st.success("Loaded pre-trained ML model.") # [27]
+            else:
+                st.info("No model found. Starting training process...")
+                classifier.train_model() # [26]
+                classifier.model.write().overwrite().save(MODEL_PATH) # [26]
+                st.success(f"Trained and saved new ML model to {MODEL_PATH}.")
+        except Exception as e:
+            st.error(f"Initialization Error: {e}")
+            st.session_state['init_failed'] = True
 
 def start_background_processes():
-    """Conceptual function to start Producer and Streamer asynchronously."""
+    """Starts News Producer via Threading and initiates PySpark Streaming."""
     
-    if 'streaming_running' not in st.session_state or not st.session_state['streaming_running']:
+    if st.session_state.get('streaming_running', False):
+        st.info("Background processes are already running.")
+        return
+
+    if 'classifier' not in st.session_state:
+         st.error("Cannot start streamer: Model Classifier has not been initialized. Please click 'Initialize/Train System'.")
+         return
+
+    st.info("Attempting to start continuous processes...")
+    
+    # 1. Start News Producer in a separate thread (Necessary for non-blocking execution)
+    producer_thread = threading.Thread(target=fetch_and_write_news, daemon=True)
+    producer_thread.start()
+    st.session_state['producer_thread'] = producer_thread
+    
+    # 2. Start Streaming Processor
+    processor = NewsStreamProcessor(st.session_state['classifier']) # [15]
+    
+    try:
+        query = processor.process_streaming_news() # [18]
         
-        # --- CRITICAL DEPLOYMENT STEP ---
-        # 1. Start News Producer (run_news_producer)
-        # This function must be executed in a separate thread or process.
-        # Example (requires external library/logic): start_thread(run_news_producer) 
-        
-        # 2. Start Streaming Processor (process_streaming_news)
-        processor = NewsStreamProcessor(st.session_state['classifier']) # [15]
-        query = processor.process_streaming_news()
-        
-        # This Spark query object needs to be tracked/managed.
         st.session_state['spark_query'] = query
         st.session_state['streaming_running'] = True
-        st.info("✅ PySpark Streaming Processor and News Producer started in background.")
-
-# Dashboard Class (Sources 19-24 are integrated directly into run_dashboard)
-
-def run_dashboard():
-    """The main Streamlit interface."""
-    
-    st.set_page_config(
-        page_title="Real-Time News Sentiment Dashboard",
-        page_icon="📰",
-        layout="wide"
-    ) # [18]
-    
-    st.title("📰 Real-Time News Sentiment Analysis Dashboard")
-    st.markdown("Live sentiment classification of news headlines using PySpark ML")
-
-    # --- Setup and Initialization Section ---
-    if st.sidebar.button("1. Initialize/Train System"):
-        initialize_system()
-
-    if 'classifier' in st.session_state:
-        if st.sidebar.button("2. Start Real-Time Processes"):
-            start_background_processes()
         
-    # --- Dashboard Visualization Section (Sources 19-24) ---
-    
-    # Check for background processes status (conceptual)
-    if 'streaming_running' not in st.session_state or not st.session_state['streaming_running']:
-        st.warning("System processes are not running. Initialize and start them first.")
-        return
-
-    # Load data (using NewsDashboard logic) [10]
-    try:
-        if os.path.exists(DASHBOARD_FILE):
-            df = pd.read_json(DASHBOARD_FILE)
-        else:
-            df = pd.DataFrame()
+        st.success("✅ PySpark Streaming Processor and News Producer started in background.")
+        st.warning(f"Data may take up to {FETCH_INTERVAL_SECONDS} seconds to appear on the dashboard.")
+        
     except Exception as e:
-        st.error(f"Error loading results: {e}")
-        df = pd.DataFrame()
+         st.error(f"❌ Failed to start Streaming Processor: {e}")
+         st.session_state['streaming_running'] = False
 
-    if df.empty:
-        st.warning("No data available yet. Waiting for streaming results...") # [18]
-        return
+
+def run_unified_app():
+    """The main Streamlit interface function."""
+    
+    dashboard = NewsDashboard() # [28]
+
+    # --- Sidebar Controls ---
+    with st.sidebar:
+        st.header("System Controls")
         
-    # [Metrics, Visualizations, and Table Display (Sources 21-24) are integrated here.]
-    
-    # ... (code for metrics and charts from 21-24) ...
+        if st.button("1. Initialize/Train System"):
+            initialize_system()
+        
+        if 'classifier' in st.session_state and not st.session_state.get('init_failed', False):
+            if st.button("2. Start Real-Time Processes"):
+                start_background_processes()
+                
+        # Status indicators
+        st.markdown("---")
+        st.subheader("Status")
+        if 'classifier' in st.session_state:
+            st.success("Model Initialized")
+        else:
+            st.error("Model Not Initialized")
+            
+        if st.session_state.get('streaming_running', False):
+            st.success("Streaming Active")
+        else:
+            st.error("Streaming Inactive")
 
-    if st.button("🔄 Refresh Dashboard Data"):
-        st.experimental_rerun() # Forces Streamlit to reload the data file [18]
+    # --- Dashboard Display ---
     
-    st.info("💡 This dashboard updates in real-time. Click refresh to see latest results.")
+    # Load data for visualization [19]
+    df = dashboard.load_results()
+    
+    # Create the dashboard UI [20]
+    dashboard.create_dashboard(df, st.session_state.get('streaming_running', False))
 
-# =============================================================================
-# MAIN STREAMLIT EXECUTION
-# =============================================================================
 
 if __name__ == "__main__":
-    # Ensure environment variables are set before running
     if not API_KEY:
-        st.error("Please set the NEWS_API_KEY environment variable.")
+        st.error("Please set the NEWS_API_KEY environment variable (see SETUP INSTRUCTIONS).")
     else:
-        # We replace the multi-mode command line parser [1] 
-        # with the direct Streamlit function call:
-        run_dashboard()
+        run_unified_app()
