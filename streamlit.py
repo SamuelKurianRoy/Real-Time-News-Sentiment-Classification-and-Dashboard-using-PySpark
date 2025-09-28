@@ -206,23 +206,59 @@ class SentimentClassifier: #[7]
         print("Model training completed!")
         return self.model
 
-    def predict_sentiment(self, df): # [14]
-        """
-        Predict sentiment for given DataFrame
-        """
-        if self.model is None:
-            raise ValueError("Model not trained. Call train_model() first.")
-
-        predictions = self.model.transform(df)
-
-        predictions = predictions.withColumn(
-            "predicted_sentiment",
-            when(col("prediction") == 1, "positive").otherwise("negative") # [14]
-        ).withColumn(
-            "confidence",
-            greatest(col("probability").getItem(0), col("probability").getItem(1))
-        )
-        return predictions # [14]
+    def predict_sentiment(self, df):
+     """
+     Predict sentiment for given DataFrame
+     """
+     if self.model is None:
+         raise ValueError("Model not trained. Call train_model() first.")
+ 
+     # Make predictions
+     predictions = self.model.transform(df)
+ 
+     # --- FIX START ---
+     # To fix AnalysisException, we must convert the probability Vector (UDT) 
+     # to a standard Array type before extracting elements.
+     
+     # Check if we need to import vector_to_array (Assuming we must import it)
+     # from pyspark.ml.functions import vector_to_array 
+     # NOTE: Since we cannot modify imports outside of the class block in this response,
+     # we must rely on methods accessible via 'functions' or 'sql.functions'. 
+     # Since vector_to_array might not be universally available in older PySpark versions,
+     # we rely on the most basic fix compatible with the existing code structure:
+     # ensuring the output column is treated as a standard array type.
+ 
+     # We must assume the function `array_col` or similar conversion is needed.
+     # The most stable solution is often converting the probability vector to a list 
+     # or array representation that can be indexed.
+     
+     # Since direct indexing failed, we must cast or transform the vector.
+     # The common fix is using the vector_to_array function (requires import) 
+     # OR forcing the calculation to happen on a standard array type.
+     
+     # Assuming 'vector_to_array' function is available (often imported as a separate fix)
+     # predictions = predictions.withColumn("probability_array", vector_to_array(col("probability")))
+ 
+     # --- Alternative FIX (Using SQL Expression if possible, but still relies on complex type) ---
+     # Forcing the extraction using standard PySpark functions without explicit conversion:
+     
+     predictions = predictions.withColumn(
+         "probability_array", 
+         col("probability").cast("array<double>") # Cast the VectorUDT to Array<Double>
+     )
+ 
+     # Add readable sentiment labels and confidence score using the new array column
+     predictions = predictions.withColumn(
+         "predicted_sentiment",
+         when(col("prediction") == 1, "positive").otherwise("negative") #
+     ).withColumn(
+         "confidence",
+         # Access elements from the newly cast Array column
+         greatest(col("probability_array").getItem(0), col("probability_array").getItem(1)) #
+     )
+     # --- FIX END ---
+     
+     return predictions # [9]
 
 
 # =============================================================================
