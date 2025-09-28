@@ -106,18 +106,124 @@ def run_news_producer():
 # [This class (SentimentClassifier) remains largely unchanged, defined by sources 7-14]
 class SentimentClassifier:
     def __init__(self):
-        # Initialize Spark Session [13, 14]
+        # Initialize Spark Session [1]
         try:
             self.spark = SparkSession.builder \
                 .appName("NewsSentimentClassification") \
-                .config("spark.master", "local[7]") \
+                .config("spark.sql.adaptive.enabled", "true") \
+                .config("spark.sql.adaptive.coalescePartitions.enabled", "true") \
+                .config("spark.serializer", "org.apache.spark.serializer.KryoSerializer") \
+                .config("spark.sql.execution.arrow.pyspark.enabled", "false") \
                 .config("spark.python.worker.reuse", "false") \
+                .master("local[2]") \
                 .getOrCreate()
+            # Set log level to reduce noise [3]
             self.spark.sparkContext.setLogLevel("ERROR")
+            print("✅ Spark session created successfully")
         except Exception as e:
-            st.error(f"❌ Error creating Spark session: {e}")
+            print(f"❌ Error creating Spark session: {e}")
             raise
         self.model = None
+        self.pipeline = None
+
+    def create_training_data(self):
+        """
+        Create synthetic training data for sentiment classification. [4]
+        In production, you would use a labeled dataset.
+        """
+        # Sample positive and negative headlines for training [4]
+        positive_headlines = [
+            "Company reports record profits this quarter",
+            "New breakthrough in renewable energy technology",
+            "Stock market reaches new all-time high",
+            "Unemployment rate drops to lowest level",
+            "Innovation drives economic growth",
+            "Successful product launch exceeds expectations",
+            "Technology advances improve healthcare outcomes",
+            "Strong earnings drive share price up",
+            "Investment in green energy creates jobs",
+            "Consumer confidence reaches decade high"
+        ]
+        negative_headlines = [
+            "Major data breach affects millions of users",
+            "Company announces massive layoffs", # [5]
+            "Stock prices plummet amid recession fears",
+            "Economic downturn impacts global markets",
+            "Cybersecurity threat shuts down operations",
+            "Inflation reaches concerning levels",
+            "Supply chain disruptions cause delays",
+            "Environmental disaster affects local business",
+            "Trade war escalates between major economies",
+            "Corporate scandal leads to investigations"
+        ]
+
+        # Create training DataFrame [6]
+        training_data = []
+        for headline in positive_headlines:
+            training_data.append((headline, "positive", 1))
+
+        for headline in negative_headlines:
+            training_data.append((headline, "negative", 0))
+
+        schema = StructType([
+            StructField("headline", StringType(), True),
+            StructField("sentiment_label", StringType(), True),
+            StructField("label", IntegerType(), True)
+        ])
+        return self.spark.createDataFrame(training_data, schema)
+
+    def build_pipeline(self):
+        """
+        Build ML pipeline for sentiment classification [7]
+        """
+        # Tokenization
+        tokenizer = Tokenizer(inputCol="headline", outputCol="words")
+        # Remove stop words
+        remover = StopWordsRemover(inputCol="words", outputCol="filtered_words")
+        # Count Vectorizer [7]
+        cv = CountVectorizer(inputCol="filtered_words", outputCol="raw_features",
+                             vocabSize=1000, minDF=2.0)
+        # TF-IDF
+        idf = IDF(inputCol="raw_features", outputCol="features")
+        # Logistic Regression
+        lr = LogisticRegression(featuresCol="features", labelCol="label", maxIter=20)
+        # Create pipeline
+        self.pipeline = Pipeline(stages=[tokenizer, remover, cv, idf, lr])
+        return self.pipeline
+
+    def train_model(self):
+        """
+        Train the sentiment classification model [8]
+        """
+        print("Creating training data...")
+        training_df = self.create_training_data() # [8]
+        training_df.show(5)
+        print("Building ML pipeline...")
+        pipeline = self.build_pipeline()
+        print("Training model...")
+        self.model = pipeline.fit(training_df)
+        print("Model training completed!")
+        return self.model
+
+    def predict_sentiment(self, df):
+        """
+        Predict sentiment for given DataFrame [9]
+        """
+        if self.model is None:
+            raise ValueError("Model not trained. Call train_model() first.")
+
+        # Make predictions
+        predictions = self.model.transform(df)
+
+        # Add readable sentiment labels [9]
+        predictions = predictions.withColumn(
+            "predicted_sentiment",
+            when(col("prediction") == 1, "positive").otherwise("negative")
+        ).withColumn(
+            "confidence",
+            greatest(col("probability").getItem(0), col("probability").getItem(1))
+        )
+        return predictions
 
     # [create_training_data, build_pipeline, train_model, predict_sentiment methods
     # (Sources 9-14) would be included here.]
