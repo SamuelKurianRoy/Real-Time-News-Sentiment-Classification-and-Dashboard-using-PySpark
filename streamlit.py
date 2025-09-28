@@ -207,7 +207,9 @@ class SentimentClassifier:
             if probability_vector is not None:
                 # Convert to dense vector and get values
                 prob_array = probability_vector.toArray()
-                return float(max(prob_array))
+                # Use Python's built-in max, not PySpark's max
+                import builtins
+                return float(builtins.max(prob_array))
             return 0.0
 
         # Register the UDF
