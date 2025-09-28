@@ -205,28 +205,37 @@ class SentimentClassifier:
         print("Model training completed!")
         return self.model
 
-    def predict_sentiment(self, df):
-        """
-        Predict sentiment for given DataFrame [9]
-        """
-        if self.model is None:
-            raise ValueError("Model not trained. Call train_model() first.")
-
-        # Make predictions
-        predictions = self.model.transform(df)
-
-        # Add readable sentiment labels [9]
-        predictions = predictions.withColumn(
-            "predicted_sentiment",
-            when(col("prediction") == 1, "positive").otherwise("negative")
-        ).withColumn(
-            "confidence",
-            greatest(col("probability").getItem(0), col("probability").getItem(1))
-        )
-        return predictions
-
-    # [create_training_data, build_pipeline, train_model, predict_sentiment methods
-    # (Sources 9-14) would be included here.]
+   def predict_sentiment(self, df):
+     """
+     Predict sentiment for given DataFrame [5]
+     """
+     if self.model is None:
+         raise ValueError("Model not trained. Call train_model() first.")
+ 
+     # Make predictions
+     predictions = self.model.transform(df)
+ 
+     # FIX: Cast the Vector UDT to a standard Array<Double> type for safe element extraction.
+     # The previous generic cast to "array" failed [1, 2].
+     predictions = predictions.withColumn(
+         "probability_array",
+         col("probability").cast("array<double>") # <-- ENSURE THIS SPECIFIC CAST IS USED
+     )
+ 
+     # Add readable sentiment labels [5]
+     predictions = predictions.withColumn(
+         "predicted_sentiment",
+         when(col("prediction") == 1, "positive").otherwise("negative")
+     ).withColumn(
+         "confidence",
+         # Access elements from the newly cast Array column [5]
+         greatest(col("probability_array").getItem(0), col("probability_array").getItem(1))
+     )
+     
+     # Drop the temporary column and return
+     return predictions.drop("probability_array")
+     # [create_training_data, build_pipeline, train_model, predict_sentiment methods
+     # (Sources 9-14) would be included here.]
 
 # =============================================================================
 # 3. SPARK STRUCTURED STREAMING PROCESSOR (Adapted for Background Use)
