@@ -37,7 +37,7 @@ def setup_pyspark_env():
     python_path = sys.executable
     
     # Configure Java and PySpark environment variables
-    os.environ['JAVA_HOME'] = '/usr/lib/jvm/java-17-openjdk-amd64'
+    os.environ['JAVA_HOME'] = '/usr/lib/jvm/java-11-openjdk-amd64'
     os.environ['PYSPARK_PYTHON'] = python_path
     os.environ['PYSPARK_DRIVER_PYTHON'] = python_path
     os.environ['SPARK_LOCAL_HOSTNAME'] = 'localhost'
@@ -149,44 +149,45 @@ class SentimentClassifier:
         self.pipeline = None
 
     def create_training_data(self):
-        """Create synthetic training data for sentiment classification."""
-        positive_headlines = [
-            "Company reports record profits this quarter",
-            "New breakthrough in renewable energy technology",
-            "Stock market reaches new all-time high",
-            "Unemployment rate drops to lowest level",
-            "Innovation drives economic growth",
-            "Successful product launch exceeds expectations",
-            "Technology advances improve healthcare outcomes",
-            "Strong earnings drive share price up",
-            "Investment in green energy creates jobs",
-            "Consumer confidence reaches decade high"
-        ]
-        negative_headlines = [
-            "Major data breach affects millions of users",
-            "Company announces massive layoffs",
-            "Stock prices plummet amid recession fears",
-            "Economic downturn impacts global markets",
-            "Cybersecurity threat shuts down operations",
-            "Inflation reaches concerning levels",
-            "Supply chain disruptions cause delays",
-            "Environmental disaster affects local business",
-            "Trade war escalates between major economies",
-            "Corporate scandal leads to investigations"
-        ]
+        """Load and prepare training data from news_sentiment_analysis.csv"""
+        print("Loading data from CSV file...")
+        try:
+            schema = StructType([
+                StructField("source", StringType(), True),
+                StructField("author", StringType(), True),
+                StructField("title", StringType(), True),
+                StructField("description", StringType(), True),
+                StructField("url", StringType(), True),
+                StructField("published_at", StringType(), True),
+                StructField("sentiment", StringType(), True),
+                StructField("type", StringType(), True)
+            ])
+            
+            # Load the CSV file with explicit schema
+            df = self.spark.read \
+                .option("header", "true") \
+                .option("inferSchema", "false") \
+                .schema(schema) \
+                .csv("news_sentiment_analysis.csv")
+            
+            print("Converting and filtering data...")
+            # Convert sentiment labels to binary labels
+            # Map 'positive' to 1, 'negative' to 0, and filter out 'neutral'
+            training_data = df.select(
+                F.col("title").alias("headline"),
+                F.col("sentiment").alias("sentiment_label"),
+                F.when(F.col("sentiment") == "positive", 1)
+                 .when(F.col("sentiment") == "negative", 0)
+                 .otherwise(None)
+                 .alias("label")
+            ).filter(F.col("label").isNotNull())
 
-        training_data = []
-        for headline in positive_headlines:
-            training_data.append((headline, "positive", 1))
-        
-        for headline in negative_headlines:
-            training_data.append((headline, "negative", 0))
+            print(f"Training data size: {training_data.count()} records")
+            return training_data
 
-        schema = StructType([
-            StructField("headline", StringType(), True),
-            StructField("sentiment_label", StringType(), True),
-            StructField("label", IntegerType(), True)
-        ])
+        except Exception as e:
+            print(f"Error in create_training_data: {str(e)}")
+            raise
         return self.spark.createDataFrame(training_data, schema)
 
     def build_pipeline(self):
@@ -202,14 +203,31 @@ class SentimentClassifier:
 
     def train_model(self):
         """Train the sentiment classification model"""
-        print("Creating training data...")
-        training_df = self.create_training_data()
-        print("Building ML pipeline...")
-        pipeline = self.build_pipeline()
-        print("Training model...")
-        self.model = pipeline.fit(training_df)
-        print("Model training completed!")
-        return self.model
+        try:
+            print("Creating training data...")
+            training_df = self.create_training_data()
+            
+            # Verify the DataFrame structure
+            print("\nTraining data schema:")
+            training_df.printSchema()
+            
+            print("\nSample of training data:")
+            training_df.show(5, truncate=False)
+            
+            print("\nClass distribution:")
+            training_df.groupBy("sentiment_label").count().show()
+            
+            print("\nBuilding ML pipeline...")
+            pipeline = self.build_pipeline()
+            
+            print("Training model...")
+            self.model = pipeline.fit(training_df)
+            print("Model training completed successfully!")
+            return self.model
+            
+        except Exception as e:
+            print(f"Error in train_model: {str(e)}")
+            raise
 
     def predict_sentiment(self, df):
         """Predict sentiment for given DataFrame"""
