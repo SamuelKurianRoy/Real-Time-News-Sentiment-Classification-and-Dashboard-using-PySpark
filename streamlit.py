@@ -9,15 +9,16 @@ import streamlit as st
 import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-# Imports for PySpark components
+from newsapi import NewsApiClient
+
+# PySpark imports
+from pyspark import SparkConf, SparkContext
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import *
-from pyspark.sql.types import *
+from pyspark.sql import functions as F
+from pyspark.sql.types import StructType, StructField, StringType, IntegerType, DoubleType
 from pyspark.ml import Pipeline, PipelineModel
 from pyspark.ml.feature import Tokenizer, StopWordsRemover, CountVectorizer, IDF
 from pyspark.ml.classification import LogisticRegression
-from pyspark.ml.linalg import VectorUDT
-from newsapi import NewsApiClient
 
 # =============================================================================
 # --- Configuration & Environment Setup ---
@@ -34,13 +35,20 @@ API_KEY = os.getenv('NEWS_API_KEY')
 # Set up PySpark environment variables
 def setup_pyspark_env():
     python_path = sys.executable
+    
+    # Configure Java and PySpark environment variables
+    os.environ['JAVA_HOME'] = '/usr/lib/jvm/java-11-openjdk-amd64'
     os.environ['PYSPARK_PYTHON'] = python_path
     os.environ['PYSPARK_DRIVER_PYTHON'] = python_path
-    # FIX: Commented out PYTHONHASHSEED assignment to resolve deployment IndexErrors
-    # os.environ['PYTHONHASHSEED'] = '0'
     os.environ['SPARK_LOCAL_HOSTNAME'] = 'localhost'
-    os.environ['SPARK_SQL_EXECUTION_ARROW_PYSPARK_ENABLED'] = 'false'
+    os.environ['PYTHONIOENCODING'] = 'utf-8'
+    os.environ['SPARK_LOCAL_IP'] = 'localhost'
+    
+    # Add Java to PATH
+    os.environ['PATH'] = f"{os.environ['JAVA_HOME']}/bin:{os.environ.get('PATH', '')}"
+    
     print(f"✅ PySpark environment configured for: {python_path}")
+    print(f"✅ Java Home set to: {os.environ['JAVA_HOME']}")
     
 setup_pyspark_env()
 
@@ -115,12 +123,21 @@ class SentimentClassifier:
         try:
             self.spark = SparkSession.builder \
                 .appName("NewsSentimentClassification") \
-                .config("spark.sql.adaptive.enabled", "true") \
-                .config("spark.sql.adaptive.coalescePartitions.enabled", "true") \
+                .config("spark.driver.host", "localhost") \
+                .config("spark.driver.bindAddress", "localhost") \
+                .config("spark.sql.adaptive.enabled", "false") \
                 .config("spark.serializer", "org.apache.spark.serializer.KryoSerializer") \
                 .config("spark.sql.execution.arrow.pyspark.enabled", "false") \
-                .config("spark.python.worker.reuse", "false")\
-                .master("local") \
+                .config("spark.python.worker.reuse", "false") \
+                .config("spark.dynamicAllocation.enabled", "false") \
+                .config("spark.executor.memory", "1g") \
+                .config("spark.driver.memory", "1g") \
+                .config("spark.sql.shuffle.partitions", "2") \
+                .config("spark.default.parallelism", "2") \
+                .config("spark.driver.extraJavaOptions", "-XX:+UseG1GC") \
+                .config("spark.executor.extraJavaOptions", "-XX:+UseG1GC") \
+                .config("spark.jars.ivy", "/tmp/.ivy") \
+                .master("local[*]") \
                 .getOrCreate()
             
             self.spark.sparkContext.setLogLevel("ERROR")
@@ -213,15 +230,15 @@ class SentimentClassifier:
             return 0.0
 
         # Register the UDF
-        extract_prob_udf = udf(extract_probability, DoubleType())
+        extract_prob_udf = F.udf(extract_probability, DoubleType())
 
         # Add readable sentiment labels and confidence
         predictions = predictions.withColumn(
             "predicted_sentiment",
-            when(col("prediction") == 1, "positive").otherwise("negative")
+            F.when(F.col("prediction") == 1, "positive").otherwise("negative")
         ).withColumn(
             "confidence",
-            extract_prob_udf(col("probability"))
+            extract_prob_udf(F.col("probability"))
         )
         
         return predictions
@@ -259,7 +276,7 @@ class NewsStreamProcessor:
             .schema(schema) \
             .json(OUTPUT_DIR)
 
-        streaming_df = streaming_df.withColumn("processing_time", current_timestamp())
+        streaming_df = streaming_df.withColumn("processing_time", F.current_timestamp())
 
         def process_batch(batch_df, batch_id):
             print(f"Processing batch {batch_id} with {batch_df.count()} records...")
