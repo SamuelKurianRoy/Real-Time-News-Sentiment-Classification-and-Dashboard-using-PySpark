@@ -37,7 +37,7 @@ def setup_pyspark_env():
     python_path = sys.executable
     
     # Configure Java and PySpark environment variables
-    os.environ['JAVA_HOME'] = '/usr/lib/jvm/java-11-openjdk-amd64'
+    os.environ['JAVA_HOME'] = '/usr/lib/jvm/java-17-openjdk-amd64'
     os.environ['PYSPARK_PYTHON'] = python_path
     os.environ['PYSPARK_DRIVER_PYTHON'] = python_path
     os.environ['SPARK_LOCAL_HOSTNAME'] = 'localhost'
